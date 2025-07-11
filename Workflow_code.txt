@@ -1,0 +1,325 @@
+# ----------------------------------------------------------------------------------------------------- #
+# Author: Antiopi Tsoureki
+# Code for Variant Calling Pipeline for Whole Genome Sequencing data of 14 Indigeous Greek Goats
+# This code was used for the analysis described in the paper published in Nature Scientific Data titled
+# "Whole genome sequencing data of 14 indigenous Greek goats"
+# ----------------------------------------------------------------------------------------------------- #
+
+
+# ======================================================================================================== #
+#                                       Step 1: Obtain the raw data                                        #
+# ======================================================================================================== #
+
+# Raw data must be located in a directory named "raw_data"
+
+# Create output directory for FastQC reports for raw data
+$ mkdir qc_report
+
+# Perform quality check with FastQC for each sample
+$ fastqc --outdir qc_report raw_data/sample1_R1.fastq.gz
+$ fastqc --outdir qc_report raw_data/sample1_R2.fastq.gz
+
+# Combine individual FastQC reports with MultiQC
+$ multiqc --outdir qc_report qc_report
+
+
+# ======================================================================================================== #
+#                              Step 2: Perform trimming and quality filtering                              #
+# ======================================================================================================== #
+
+# Create directory for trimmed files
+$ mkdir trimmed_data
+
+# Perform quality filtering for each sample, taking into acccount polyG sequences
+$ trim_galore --2colour 34 --cores 8 -o trimmed_data --paired raw_data/sample1_R1.fastq.gz raw_data/sample1_R2.fastq.gz
+
+# Create output directory for FastQC reports for filtered data
+$ mkdir trimmed_data/qc_report
+
+# Perform quality check of the filtered data for each sample
+$ fastqc --outdir trimmed_data/qc_report trimmed_data/*
+
+# Combine individual FastQC reports with MultiQC
+$ multiqc --outdir trimmed_data/qc_report trimmed_data/qc_report
+
+
+# ======================================================================================================== #
+#                         Step 3: Retrieve and prepare the Goat Reference Genome                           #
+# ======================================================================================================== #
+
+# Create directory for reference genome files
+$ mkdir ref_genome
+
+# Download the Capra hircus reference genome
+$ wget -P ref_genome https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/001/704/415/GCA_001704415.2_ARS1.2/GCA_001704415.2_ARS1.2_genomic.fna.gz
+
+# Unzip the reference genome file
+$ gzip -d ref_genome/GCA_001704415.2_ARS1.2_genomic.fna.gz
+
+# Create the FASTA index file required for BWA to run succe
+$ bwa index -p ref_genome/chircus_v1.2 ref_genome/GCA_001704415.2_ARS1.2_genomic.fna
+
+
+# ======================================================================================================== #
+#                                   Step 4: Alignment – Map to Reference                                   #
+# ======================================================================================================== #
+
+# Align the reads to the goat reference genome for each sample
+$ bwa mem -t 10 -K 100000000 -Y -R '@RG\tID:sample1\tLB:sample1_LIB\tPL:ILLUMINA\tPM:UNKNOWN\tSM:sample1' ref_genome/chircus_v1.2 trimmed_data/sample1_R1_val_1.fq.gz trimmed_data/sample1_R2_val_2.fq.gz -o sample1_aligned_reads.sam
+
+# Get the alignment stats for each sample
+$ samtools stats sample1_aligned_reads.sam > sample1_alignment_stats.txt
+
+
+# ======================================================================================================== #
+#                                      Step 5: Mark Duplicates & Sort                                      #
+# ======================================================================================================== #
+
+# Mark duplicate reads and sort them for each sample
+$ gatk MarkDuplicatesSpark -I sample1_aligned_reads.sam -O sample1_sorted_dedup_reads.bam
+
+
+# ======================================================================================================== #
+#                                 Step 6: Base Quality Score Recalibration                                 #
+# ======================================================================================================== #
+
+# Create a dictionary file for the reference genome FASTA file
+$ gatk CreateSequenceDictionary -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna
+
+# Create an index file for the reference genome FASTA file
+$ samtools faidx ref_genome/GCA_001704415.2_ARS1.2_genomic.fna
+
+# Retrieve the the known variants for the goat genome from the Ensembl ftp site
+$ wget -P ref_genome https://ftp.ensembl.org/pub/release-112/variation/vcf/capra_hircus/capra_hircus.vcf.gz
+
+# Unzip the vcf file
+$ gzip -d ref_genome/capra_hircus.vcf.gz
+
+# Create an index file for the vcf file
+$ gatk IndexFeatureFile -I ref_genome/capra_hircus.vcf
+
+
+# Perform Base Quality Score Recalibration repeatedly until convergence is observed
+
+# Base Quality Score Recalibration (BQSR) #1 ------------------------------------------------------- #
+
+# -  Build the 1st model for each sample
+$ gatk BaseRecalibrator -I sample1_sorted_dedup_reads_fixed_tags.bam -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna --known-sites ref_genome/capra_hircus.vcf -O sample1_recal_data_1.table
+
+# -  Apply the 1st model to each sample
+$ gatk ApplyBQSR -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -bqsr sample1_recal_data_1.table -I sample1_sorted_dedup_reads_fixed_tags.bam -O sample1_recal_reads_1.bam
+
+
+# BQSR #2 ------------------------------------------------------------------------------------------ #
+
+# -  Build the 2nd model for each sample
+$ gatk BaseRecalibrator -I sample1_recal_reads_1.bam -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna --known-sites ref_genome/capra_hircus.vcf -O sample1_recal_data_2.table
+
+# -  Apply the 2nd model to each sample
+$ gatk ApplyBQSR -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -bqsr sample1_recal_data_2.table -I sample1_recal_reads_1.bam -O sample1_recal_reads_2.bam
+
+
+# BQSR #3 ------------------------------------------------------------------------------------------ #
+
+# -  Build the 3rd model for each sample
+$ gatk BaseRecalibrator -I sample1_recal_reads_2.bam -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna --known-sites ref_genome/capra_hircus.vcf -O sample1_recal_data_3.table
+
+# -  Apply the 3rd model to each sample
+$ gatk ApplyBQSR -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -bqsr sample1_recal_data_3.table -I sample1_recal_reads_2.bam -O sample1_recal_reads_3.bam
+
+
+# BQSR #4 ------------------------------------------------------------------------------------------ #
+
+# -  Build the 4th model for each sample
+$ gatk BaseRecalibrator -I sample1_recal_reads_3.bam -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna --known-sites ref_genome/capra_hircus.vcf -O sample1_recal_data_4.table
+
+# -  Apply the 4th model to each sample
+$ gatk ApplyBQSR -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -bqsr sample1_recal_data_4.table -I sample1_recal_reads_3.bam -O sample1_recal_reads_4.bam
+
+
+# ======================================================================================================== #
+#                                          Step 7: Call Variants                                           #
+# ======================================================================================================== #
+
+# Call variants on the recalibrated data for each sample
+$ gatk HaplotypeCaller -ERC GVCF -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -I sample1_recal_reads_4.bam -O sample1_raw_variants.g.vcf.gz
+
+
+# ======================================================================================================== #
+#                               Step 8: Consolidate the individual GVCF Files                              #
+# ======================================================================================================== #
+
+# Import the GVCF files for all samples into a signle GenomicsDB object
+# This step is performed only for the autosomal chromosomes and the respective variants
+$ gatk GenomicsDBImport --genomicsdb-workspace-path GenomicsDB \
+  -L autosomal_chromosomes.list \
+  --V sample1_raw_variants.g.vcf.gz \
+  --V sample2_raw_variants.g.vcf.gz \
+  --V sample3_raw_variants.g.vcf.gz \
+  --V sample4_raw_variants.g.vcf.gz \
+  --V sample5_raw_variants.g.vcf.gz \
+  --V sample6_raw_variants.g.vcf.gz \
+  --V sample7_raw_variants.g.vcf.gz \
+  --V sample8_raw_variants.g.vcf.gz \
+  --V sample9_raw_variants.g.vcf.gz \
+  --V sample10_raw_variants.g.vcf.gz \
+  --V sample11_raw_variants.g.vcf.gz \
+  --V sample12_raw_variants.g.vcf.gz \
+  --V sample13_raw_variants.g.vcf.gz \
+  --V sample14_raw_variants.g.vcf.gz
+
+
+# ======================================================================================================== #
+#                                        Step 9: Perform Genotyping                                        #
+# ======================================================================================================== #
+
+# Genotype samples for autosomal chromosomes
+$ gatk GenotypeGVCFs -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -V gendb://GenomicsDB -O Goat_raw_autosomal_variants_cohort.vcf.gz
+
+# Count variants
+$ gatk CountVariants -V Goat_raw_autosomal_variants_cohort.vcf.gz
+
+
+# ======================================================================================================== #
+#                                          Step 10: Perform VQSR                                           #
+# ======================================================================================================== #
+
+# Prepare High-quality variants from my callset to use as training and truth set ------------------------- #
+
+# Separate SNPs and INDELs
+$ gatk SelectVariants -V Goat_raw_autosomal_variants_cohort.vcf.gz -select-type SNP -O Goat_RA_SNPs.vcf.gz
+$ gatk SelectVariants -V Goat_raw_autosomal_variants_cohort.vcf.gz -select-type INDEL -O Goat_RA_INDELs.vcf.gz
+
+# Hard-filter SNPs
+$ gatk VariantFiltration \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_RA_SNPs.vcf.gz \
+  -O Goat_RA_SNPs_HF.vcf.gz \
+  -filter-name "QUAL_filter" -filter "QUAL < 50.0" \
+  -filter-name "minDP_10" -filter "DP < 10.0" \
+  -filter-name "maxDP_100" -filter "DP > 200.0" \
+  -filter-name "QD_filter" -filter "QD < 5.0" \
+  -filter-name "FS_filter" -filter "FS > 2.0" \
+  -filter-name "MQ_filter" -filter "MQ < 55.0" \
+  -filter-name "SOR_filter" -filter "SOR > 3.0" \
+  -filter-name "minMQRankSum_filter" -filter "MQRankSum < -1.0" \
+  -filter-name "minReadPosRankSum_lowerfilter" -filter "ReadPosRankSum < -2.5" \
+  -filter-name "maxReadPosRankSum_lowerfilter" -filter "ReadPosRankSum > 2.5"
+
+# Hard-filter INDELs
+$ gatk VariantFiltration \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_RA_INDELs.vcf.gz \
+  -O Goat_RA_INDELs_HF.vcf.gz \
+  -filter-name "QUAL_filter" -filter "QUAL < 50.0" \
+  -filter-name "minDP_10" -filter "DP < 10.0" \
+  -filter-name "maxDP_100" -filter "DP > 200.0" \
+  -filter-name "QD_filter" -filter "QD < 5.0" \
+  -filter-name "FS_filter" -filter "FS > 2.0" \
+  -filter-name "SOR_filter" -filter "SOR > 3.0" \
+  -filter-name "minReadPosRankSum_lowerfilter" -filter "ReadPosRankSum < -2.5" \
+  -filter-name "maxReadPosRankSum_lowerfilter" -filter "ReadPosRankSum > 2.5"
+
+
+# Perform VQSR ------------------------------------------------------------------------------------------- #
+
+# -  Build the VQSR model for SNPs
+$ gatk VariantRecalibrator \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_raw_autosomal_variants_cohort.vcf.gz \
+  -resource:greek64,known=false,training=true,truth=true,prior=12 Greek64_resource.vcf \
+  -resource:mydataHF,known=false,training=true,truth=true,prior=10 Goat_RA_SNPs_HF.vcf.gz \
+  -resource:ensembl,known=true,training=false,truth=false,prior=2 capra_hircus_ensembl_resource.vcf \
+  -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR -an DP -an InbreedingCoeff \
+  -mode SNP \
+  -tranche 100.0 -tranche 99.9 -tranche 99.5 -tranche 99.0 -tranche 95.0 -tranche 90.0 \
+  -O RA_HF_SNPs.recal \
+  --tranches-file RA_HF_SNPs.tranches \
+  --rscript-file RA_HF_SNPs.plots.R
+
+# -  Build the VQSR model for INDELs
+$ gatk VariantRecalibrator \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_raw_autosomal_variants_cohort.vcf.gz \
+  -resource:mydataHF,known=false,training=true,truth=true,prior=10 Goat_RA_INDELs_HF.vcf.gz \
+  -resource:ensembl,known=true,training=false,truth=false,prior=2 capra_hircus_ensembl_resource.vcf \
+  -an QD -an DP -an FS -an SOR -an ReadPosRankSum -an MQRankSum -an InbreedingCoeff \
+  -mode INDEL --max-gaussians 4 \
+  -tranche 100.0 -tranche 99.9 -tranche 99.5 -tranche 99.0 -tranche 95.0 -tranche 90.0 \
+  -O RA_HF_INDELs.recal \
+  --tranches-file RA_HF_INDELs.tranches \
+  --rscript-file RA_HF_INDELs.plots.R
+
+
+# -  Apply the score cut-off for SNPs
+$ gatk ApplyVQSR \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_raw_autosomal_variants_cohort.vcf.gz \
+  -O Goat_Final_RA_VQSR_SNPs.vcf.gz \
+  --truth-sensitivity-filter-level 99.0 \
+  --tranches-file RA_HF_SNPs.tranches \
+  --recal-file RA_HF_SNPs.recal \
+  -mode SNP
+
+# -  Apply the score cut-off for INDELs
+$ gatk ApplyVQSR \
+  -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna \
+  -V Goat_Final_RA_VQSR_SNPs.vcf.gz \
+  -O Goat_Final_RA_VQSR_SNPs_INDELs.vcf.gz \
+  --truth-sensitivity-filter-level 99.0 \
+  --tranches-file RA_HF_INDELs.tranches \
+  --recal-file RA_HF_INDELs.recal \
+  -mode INDEL
+
+# Exclude Filtered Variants
+$ gatk SelectVariants --exclude-filtered -V Goat_Final_RA_VQSR_SNPs_INDELs.vcf.gz -O Goat_Final_AV_VQSR_Filtered.vcf.gz
+
+
+# ======================================================================================================== #
+#                                   Step 11: Further filter the Variants                                   #
+# ======================================================================================================== #
+
+# Filter out variants with very high total coverage acrossa samples
+$ gatk VariantFiltration -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -V Goat_Final_AV_VQSR_Filtered.vcf.gz -O Goat_Final_AV_VQSR_Filtered_DP110.vcf.gz -filter-name "maxDP_110" -filter "DP > 110.0"
+
+# Exclude filtered variants based on DP and filter out multiallelic and monomorphic variants and very long INDELs (>50 bp)
+$ gatk SelectVariants --exclude-filtered --restrict-alleles-to BIALLELIC --exclude-non-variants --max-indel-size 51 -V Goat_Final_AV_VQSR_Filtered_DP110.vcf.gz -O Goat_Final_AV_14M.vcf.gz
+
+
+# ======================================================================================================== #
+#                                      Step 12: Annotate the Variants                                      #
+# ======================================================================================================== #
+
+# Annotate variants using SnpEff
+$ java -jar snpEff.jar -v ARS1.2 -stats Goat_Final_AV_14M_Annotated.html Goat_Final_AV_14M.vcf.gz > Goat_Final_AV_14M_Annotated.vcf
+
+
+# ======================================================================================================== #
+#                             Step 13: Calculate Various Metrics for Variants                              #
+# ======================================================================================================== #
+
+# Calculate variant depth
+$ vcftools --gzvcf Goat_Final_AV_14M.vcf.gz --site-depth --out Goat_AV_14M_site_depth
+
+# Calculate sample missingness
+$ vcftools --gzvcf Goat_Final_AV_14M.vcf.gz --missing-indv --out Goat_AV_14M_missing_individual
+
+# Calculate SNP density in 1Kb windows
+$ vcftools --gzvcf Goat_Final_AV_14M.vcf.gz --SNPdensity 1000 --out Goat_AV_14M_snp_density
+
+
+# ======================================================================================================== #
+#                                           Step 14: Perform PCA                                           #
+# ======================================================================================================== #
+
+# Get variants with MAF>0.05 and maximim number of no calls equal to 4
+$ gatk SelectVariants -R ref_genome/GCA_001704415.2_ARS1.2_genomic.fna -V Goat_Final_AV_14M.vcf.gz --select "AF > 0.05" --max-nocall-number 4 -O Goat_14M_MAF005_MaxNoCall4_variants.vcf.gz
+
+# Obtain evenly-spaced variants
+$ vcftools --gzvcf Goat_14M_MAF005_MaxNoCall4_variants.vcf.gz --thin 50000 --recode --out Goat_PCA_variants
+
+# Convert vcf files to plink binary format
+$ plink --allow-extra-chr --chr-set 29 --vcf Goat_PCA_variants.vcf --make-bed --out Goat_PCA_variants
+
+# Perform PCA using plink
+$ plink --allow-extra-chr --chr-set 29 --bfile Goat_PCA_variants --pca --out Goat_PCA_variants
