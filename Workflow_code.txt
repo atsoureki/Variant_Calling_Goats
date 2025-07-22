@@ -1,6 +1,6 @@
 # ----------------------------------------------------------------------------------------------------- #
 # Author: Antiopi Tsoureki
-# Code for Variant Calling Pipeline for Whole Genome Sequencing data of 14 Indigeous Greek Goats
+# Code for Variant Calling Pipeline for Whole Genome Sequencing data of 14 Indigenous Greek Goats
 # This code was used for the analysis described in the paper published in Nature Scientific Data titled
 # "Whole genome sequencing data of 14 indigenous Greek goats"
 # ----------------------------------------------------------------------------------------------------- #
